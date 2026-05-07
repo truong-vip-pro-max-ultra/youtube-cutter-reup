@@ -498,7 +498,9 @@ def apply_pip_to_segment(args):
         filter_parts.append(f"[{current}][pip{i}]overlay={x}:{y}[{out}]")
         current = out
 
-    encoder_args = get_encoder_args(best_encoder, fps)
+    # QSV/AMF trên Windows hay treo với filter_complex overlay → dùng libx264
+    pip_encoder = "libx264" if best_encoder in ("h264_qsv", "h264_amf") else best_encoder
+    encoder_args = get_encoder_args(pip_encoder, fps)
     command = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         *input_args,
@@ -580,7 +582,9 @@ def apply_pip_overlays(input_video, overlay_paths, overlay_positions,
 
     else:
         # ── CPU overlay path (Mac videotoolbox, Intel QSV, AMD AMF, libx264) ──
-        encoder_args = get_encoder_args(best_encoder, fps)
+        # QSV/AMF trên Windows hay treo với filter_complex overlay → dùng libx264
+        pip_encoder = "libx264" if best_encoder in ("h264_qsv", "h264_amf") else best_encoder
+        encoder_args = get_encoder_args(pip_encoder, fps)
 
         input_args = ["-i", input_video]
         for opath in overlay_paths:
