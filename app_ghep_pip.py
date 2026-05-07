@@ -501,7 +501,7 @@ def apply_pip_to_segment(args):
     pip_encoder = best_encoder if best_encoder == "h264_videotoolbox" else "libx264"
     encoder_args = get_encoder_args(pip_encoder, fps)
     command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
         *input_args,
         "-filter_complex", ";".join(filter_parts),
         "-map", "[vfinal]",
@@ -513,8 +513,8 @@ def apply_pip_to_segment(args):
         output_path
     ]
     result = subprocess.run(
-        command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        text=True, creationflags=SUBPROCESS_FLAGS
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, text=True, creationflags=SUBPROCESS_FLAGS
     )
     return (idx, result.returncode == 0, output_path, result.stderr)
 
@@ -522,11 +522,7 @@ def apply_pip_to_segment(args):
 def apply_pip_overlays(input_video, overlay_paths, overlay_positions,
                         overlay_size_pcts, output_video, main_duration, fps,
                         best_encoder, progress_callback=None, log_callback=None):
-    """
-    PiP overlay với progress realtime.
-    - NVIDIA (h264_nvenc): dùng overlay_cuda → toàn bộ pipeline trên GPU, cực nhanh.
-    - Các encoder khác: CPU overlay + hardware encode như cũ.
-    """
+    """PiP overlay với progress realtime. Luôn dùng CPU overlay; Mac giữ videotoolbox encode."""
     n = len(overlay_paths)
     if n == 0:
         return True, ""
@@ -540,46 +536,46 @@ def apply_pip_overlays(input_video, overlay_paths, overlay_positions,
         "bottom-right": (f"W-w-{margin}", f"H-h-{margin}"),
     }
 
-    # ── CPU overlay path ──
-    # Chỉ Mac (h264_videotoolbox) giữ hardware encode; Windows (nvenc/qsv/amf) dùng libx264 tránh treo
+    # Mac dùng videotoolbox; Windows dùng libx264 (tránh treo với nvenc/qsv/amf + filter_complex)
     pip_encoder = best_encoder if best_encoder == "h264_videotoolbox" else "libx264"
     encoder_args = get_encoder_args(pip_encoder, fps)
 
-        input_args = ["-i", input_video]
-        for opath in overlay_paths:
-            input_args += ["-stream_loop", "-1", "-i", opath]
+    input_args = ["-i", input_video]
+    for opath in overlay_paths:
+        input_args += ["-stream_loop", "-1", "-i", opath]
 
-        filter_parts = []
-        for i, ow in enumerate(overlay_size_pcts):
-            ow = max(2, int(ow) // 2 * 2)
-            filter_parts.append(f"[{i+1}:v]scale={ow}:-2[pip{i}]")
+    filter_parts = []
+    for i, ow in enumerate(overlay_size_pcts):
+        ow = max(2, int(ow) // 2 * 2)
+        filter_parts.append(f"[{i+1}:v]scale={ow}:-2[pip{i}]")
 
-        current = "0:v"
-        for i, pos in enumerate(overlay_positions):
-            x, y = pos_map.get(pos, (margin, margin))
-            out = "vfinal" if i == n - 1 else f"vtmp{i}"
-            filter_parts.append(f"[{current}][pip{i}]overlay={x}:{y}[{out}]")
-            current = out
+    current = "0:v"
+    for i, pos in enumerate(overlay_positions):
+        x, y = pos_map.get(pos, (margin, margin))
+        out = "vfinal" if i == n - 1 else f"vtmp{i}"
+        filter_parts.append(f"[{current}][pip{i}]overlay={x}:{y}[{out}]")
+        current = out
 
-        command = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-threads", "0",
-            "-progress", "pipe:1", "-stats_period", "1",
-            *input_args,
-            "-filter_complex", ";".join(filter_parts),
-            "-map", "[vfinal]",
-            "-map", "0:a:0",
-            *encoder_args,
-            "-pix_fmt", "yuv420p",
-            "-r", str(fps),
-            "-c:a", "copy",
-            "-t", str(main_duration),
-            "-movflags", "+faststart",
-            output_video
-        ]
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-threads", "0",
+        "-progress", "pipe:1", "-stats_period", "1",
+        *input_args,
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[vfinal]",
+        "-map", "0:a:0",
+        *encoder_args,
+        "-pix_fmt", "yuv420p",
+        "-r", str(fps),
+        "-c:a", "copy",
+        "-t", str(main_duration),
+        "-movflags", "+faststart",
+        output_video
+    ]
 
     proc = subprocess.Popen(
         command,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -597,53 +593,6 @@ def apply_pip_overlays(input_video, overlay_paths, overlay_positions,
 
     proc.wait()
     stderr_output = proc.stderr.read()
-
-    # Fallback: nếu CUDA path lỗi → log lỗi rồi thử lại bằng CPU path
-    if proc.returncode != 0 and best_encoder == "h264_nvenc":
-        if log_callback:
-            log_callback(f"  [CUDA] Lỗi overlay_cuda: {stderr_output.strip()[:200]}", "error")
-            log_callback("  [CUDA] Fallback → CPU overlay...", "info")
-        encoder_args = get_encoder_args(best_encoder, fps)
-        input_args_cpu = ["-i", input_video]
-        for opath in overlay_paths:
-            input_args_cpu += ["-stream_loop", "-1", "-i", opath]
-
-        filter_parts_cpu = []
-        for i, ow in enumerate(overlay_size_pcts):
-            ow = max(2, int(ow) // 2 * 2)
-            filter_parts_cpu.append(f"[{i+1}:v]scale={ow}:-2[pip{i}]")
-        current = "0:v"
-        for i, pos in enumerate(overlay_positions):
-            x, y = pos_map.get(pos, (margin, margin))
-            out = "vfinal" if i == n - 1 else f"vtmp{i}"
-            filter_parts_cpu.append(f"[{current}][pip{i}]overlay={x}:{y}[{out}]")
-            current = out
-
-        cmd_cpu = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-threads", "0",
-            "-progress", "pipe:1", "-stats_period", "1",
-            *input_args_cpu,
-            "-filter_complex", ";".join(filter_parts_cpu),
-            "-map", "[vfinal]", "-map", "0:a:0",
-            *encoder_args,
-            "-pix_fmt", "yuv420p", "-r", str(fps),
-            "-c:a", "copy", "-t", str(main_duration),
-            "-movflags", "+faststart", output_video
-        ]
-        proc2 = subprocess.Popen(cmd_cpu, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, creationflags=SUBPROCESS_FLAGS)
-        for line in proc2.stdout:
-            if line.startswith("out_time_us=") and main_duration > 0 and progress_callback:
-                try:
-                    us = int(line.strip().split("=")[1])
-                    progress_callback(min(us / 1_000_000 / main_duration, 1.0))
-                except Exception:
-                    pass
-        proc2.wait()
-        stderr_output = proc2.stderr.read()
-        return proc2.returncode == 0, stderr_output
-
     return proc.returncode == 0, stderr_output
 
 
