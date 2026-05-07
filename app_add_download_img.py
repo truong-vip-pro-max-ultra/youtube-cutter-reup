@@ -1241,6 +1241,7 @@ class VideoTab(tk.Frame):
 
         # Image crawler
         self.show_crawl      = tk.BooleanVar(value=False)
+        self.crawl_engine    = tk.StringVar(value="Bing")
         self.crawl_keyword   = tk.StringVar(value="")
         self.crawl_layout    = tk.StringVar(value="Ngang")
         self.crawl_max_num   = tk.IntVar(value=30)
@@ -1377,7 +1378,7 @@ class VideoTab(tk.Frame):
         FlatButton(img_field, "Chọn", command=self.select_images,
                    width=76, height=34, padx=10).pack(side="right", padx=3, pady=3)
 
-        # ── Tải ảnh từ Bing (collapsible) ──
+        # ── Tải ảnh theo từ khoá (collapsible) ──
         tk.Frame(self.images_card.body, bg=CARD_HEADER, height=1).pack(fill="x", padx=8, pady=(4, 6))
 
         crawl_opts = tk.Frame(self.images_card.body, bg=CARD_BG)
@@ -1389,7 +1390,7 @@ class VideoTab(tk.Frame):
                 crawl_opts.pack_forget()
 
         ToggleSwitch(
-            self.images_card.body, "⬇  Tải ảnh từ Bing theo từ khoá",
+            self.images_card.body, "⬇  Tải ảnh theo từ khoá",
             self.show_crawl,
             command=_toggle_crawl
         ).pack(anchor="w", fill="x", pady=(0, 4))
@@ -1403,6 +1404,16 @@ class VideoTab(tk.Frame):
                  bg=INPUT_BG, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY,
                  font=(UI_FONT, 10), relief="flat", borderwidth=0
                  ).pack(side="left", fill="x", expand=True, padx=(0, 10), pady=6)
+
+        engine_row = tk.Frame(crawl_opts, bg=CARD_BG)
+        engine_row.pack(fill="x", pady=(0, 6))
+
+        tk.Label(engine_row, text="Nguồn tìm", bg=CARD_BG, fg=TEXT_SECONDARY,
+                 font=(UI_FONT, 9)).pack(side="left", padx=(8, 4))
+        ttk.Combobox(engine_row, textvariable=self.crawl_engine,
+                     values=["Bing", "Pinterest", "Flickr"],
+                     state="readonly", font=(UI_FONT, 9), width=10,
+                     style="Modern.TCombobox").pack(side="left")
 
         opts_row = tk.Frame(crawl_opts, bg=CARD_BG)
         opts_row.pack(fill="x", pady=(0, 6))
@@ -1434,7 +1445,20 @@ class VideoTab(tk.Frame):
 
         self.crawl_btn = FlatButton(crawl_opts, "⬇  Tải ảnh",
                                     command=self._start_crawl, height=34)
-        self.crawl_btn.pack(fill="x", pady=(0, 8))
+        self.crawl_btn.pack(fill="x", pady=(0, 6))
+
+        self.crawl_progress = ttk.Progressbar(
+            crawl_opts, mode="determinate",
+            style="Modern.Horizontal.TProgressbar"
+        )
+        self.crawl_progress.pack(fill="x", ipady=3, pady=(0, 2))
+        self.crawl_progress["value"] = 0
+
+        self.crawl_count_label = tk.Label(
+            crawl_opts, text="", bg=CARD_BG, fg=TEXT_SECONDARY,
+            font=(UI_FONT, 8)
+        )
+        self.crawl_count_label.pack(anchor="e", padx=4, pady=(0, 8))
 
         _toggle_crawl()   # ẩn mặc định
 
@@ -1956,11 +1980,18 @@ class VideoTab(tk.Frame):
         threading.Thread(target=self._download_images, daemon=True).start()
 
     def _download_images(self):
-        try:
-            from icrawler.builtin import BingImageCrawler
-        except ImportError:
-            self.log("Thiếu thư viện: pip install icrawler", "error")
-            return
+        engine = self.crawl_engine.get()
+
+        if engine == "Bing":
+            try:
+                from icrawler.builtin import BingImageCrawler as _chk  # noqa: F401
+            except ImportError:
+                self.log("Thiếu thư viện: pip install icrawler", "error")
+                return
+        elif engine in ("Pinterest", "Flickr"):
+            if not shutil.which("gallery-dl"):
+                self.log("Thiếu gallery-dl: pip install gallery-dl", "error")
+                return
 
         keyword = self.crawl_keyword.get().strip()
         if not keyword:
@@ -1975,32 +2006,102 @@ class VideoTab(tk.Frame):
         safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in keyword)[:40].strip()
         save_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"crawl_{safe}")
 
-        if os.path.exists(save_folder):
-            shutil.rmtree(save_folder)
-        os.makedirs(save_folder)
-
         self.queue_ui(lambda: self.crawl_btn.set_state("disabled"))
         self.queue_ui(lambda: self.crawl_btn.set_text("Đang tải..."))
-        self.log(f"Tải ảnh: '{keyword}' | layout={layout} | max={max_num} | min_px={min_width}", "info")
+
+        self.log(f"Tải ảnh [{engine}]: '{keyword}' | loại={self.crawl_layout.get()} | max={max_num} | min_px={min_width}", "info")
 
         try:
-            crawler = BingImageCrawler(
-                storage={"root_dir": save_folder},
-                feeder_threads=1, parser_threads=1, downloader_threads=4
-            )
-            filters = {"size": "large"}
-            if layout != "any":
-                filters["layout"] = layout
-            crawler.crawl(keyword=keyword, filters=filters, max_num=max_num)
+            if os.path.exists(save_folder):
+                shutil.rmtree(save_folder, ignore_errors=True)
+            os.makedirs(save_folder, exist_ok=True)
+
+            # Reset progress bar
+            self.queue_ui(lambda: self.crawl_progress.configure(value=0, maximum=max_num))
+            self.queue_ui(lambda: self.crawl_count_label.configure(text=f"0 / {max_num}"))
+
+            # Thread giám sát thư mục, log + cập nhật progress theo thời gian thực
+            stop_monitor = threading.Event()
+            def _monitor():
+                seen = set()
+                count = 0
+                while not stop_monitor.is_set():
+                    try:
+                        # Thu thập đệ quy (gallery-dl tạo subfolder)
+                        current = set()
+                        for root, _, files in os.walk(save_folder):
+                            for f in files:
+                                current.add(os.path.join(root, f))
+                        for fpath in sorted(current - seen):
+                            count += 1
+                            self.log(f"  [{count}/{max_num}] ↓ {os.path.basename(fpath)}", "info")
+                            n = count
+                            self.queue_ui(lambda v=n: self.crawl_progress.configure(value=v))
+                            self.queue_ui(lambda v=n: self.crawl_count_label.configure(
+                                text=f"{v} / {max_num}"))
+                        seen = current
+                    except Exception:
+                        pass
+                    stop_monitor.wait(0.5)
+            threading.Thread(target=_monitor, daemon=True).start()
+
+            if engine == "Bing":
+                from icrawler.builtin import BingImageCrawler
+                crawler = BingImageCrawler(
+                    storage={"root_dir": save_folder},
+                    feeder_threads=1, parser_threads=1, downloader_threads=4
+                )
+                filters = {"size": "large"}
+                if layout != "any":
+                    filters["layout"] = layout
+                crawler.crawl(keyword=keyword, filters=filters, max_num=max_num)
+
+            elif engine in ("Pinterest", "Flickr"):
+                import urllib.parse
+                q = urllib.parse.quote(keyword)
+                url = (
+                    f"https://www.pinterest.com/search/pins/?q={q}"
+                    if engine == "Pinterest"
+                    else f"https://www.flickr.com/search/?text={q}&sort=relevance"
+                )
+                subprocess.run(
+                    ["gallery-dl", "--dest", save_folder,
+                     "--range", f"1-{max_num}", url],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=SUBPROCESS_FLAGS
+                )
+
+            stop_monitor.set()
+
+            # Gom tất cả file từ subfolder (gallery-dl tạo subfolder) về root
+            all_files = []
+            for root, _, files in os.walk(save_folder):
+                for f in files:
+                    all_files.append(os.path.join(root, f))
 
             kept = deleted = 0
-            for fname in os.listdir(save_folder):
-                fpath = os.path.join(save_folder, fname)
+            for fpath in all_files:
+                dest = os.path.join(save_folder, os.path.basename(fpath))
+                if fpath != dest:
+                    try:
+                        os.rename(fpath, dest)
+                        fpath = dest
+                    except Exception:
+                        pass
                 try:
                     img = Image.open(fpath)
-                    w, _ = img.size
+                    w, h = img.size
                     img.close()
-                    if w < min_width:
+                    ratio = w / h if h else 1
+                    layout_ok = (
+                        layout == "any"
+                        or (layout == "wide"   and ratio > 1.2)
+                        or (layout == "tall"   and ratio < 0.85)
+                        or (layout == "square" and 0.85 <= ratio <= 1.2)
+                    )
+                    if w < min_width or not layout_ok:
                         os.remove(fpath)
                         deleted += 1
                     else:
@@ -2012,6 +2113,14 @@ class VideoTab(tk.Frame):
                         pass
                     deleted += 1
 
+            # Xoá subfolder trống còn sót
+            for root, dirs, _ in os.walk(save_folder, topdown=False):
+                for d in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, d))
+                    except Exception:
+                        pass
+
             self.queue_ui(lambda f=save_folder: self.image_folder.set(f))
             self.log(f"Xong: {kept} ảnh đạt chuẩn, bỏ {deleted} ảnh nhỏ → {save_folder}", "success")
         except Exception as e:
@@ -2019,6 +2128,8 @@ class VideoTab(tk.Frame):
         finally:
             self.queue_ui(lambda: self.crawl_btn.set_state("normal"))
             self.queue_ui(lambda: self.crawl_btn.set_text("⬇  Tải ảnh"))
+            self.queue_ui(lambda: self.crawl_progress.configure(value=0))
+            self.queue_ui(lambda: self.crawl_count_label.configure(text=""))
 
     # =========================================================
     # VIDEO CLIP MODE HANDLERS
