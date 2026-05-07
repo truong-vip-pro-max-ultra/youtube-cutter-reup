@@ -1963,21 +1963,22 @@ class VideoTab(tk.Frame):
         row1 = tk.Frame(item_frame, bg=CARD_HEADER)
         row1.pack(fill="x", padx=8, pady=(6, 2))
 
-        tk.Label(
-            row1, text=f"▶ {os.path.basename(path)}", bg=CARD_HEADER,
-            fg=TEXT_PRIMARY, font=(UI_FONT, 9), anchor="w"
-        ).pack(side="left", fill="x", expand=True)
-
         # Dùng item dict để xóa theo reference — không phụ thuộc index
         item = {"path": path, "pos_var": pos_var, "size_var": size_var,
                 "frame": item_frame}
 
+        # Pack ✕ trước để tkinter giữ chỗ cho nó; label mở rộng phần còn lại
         del_lbl = tk.Label(
             row1, text="✕", bg=CARD_HEADER, fg=DANGER,
             font=(UI_FONT, 11), cursor="hand2", padx=6
         )
         del_lbl.pack(side="right")
         del_lbl.bind("<Button-1>", lambda e, it=item: self._remove_pip_item(it))
+
+        tk.Label(
+            row1, text=f"▶ {os.path.basename(path)}", bg=CARD_HEADER,
+            fg=TEXT_PRIMARY, font=(UI_FONT, 9), anchor="w"
+        ).pack(side="left", fill="x", expand=True)
 
         # Row 2: position picker + size input
         row2 = tk.Frame(item_frame, bg=CARD_HEADER)
