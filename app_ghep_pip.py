@@ -498,8 +498,7 @@ def apply_pip_to_segment(args):
         filter_parts.append(f"[{current}][pip{i}]overlay={x}:{y}[{out}]")
         current = out
 
-    # QSV/AMF trên Windows hay treo với filter_complex overlay → dùng libx264
-    pip_encoder = "libx264" if best_encoder in ("h264_qsv", "h264_amf") else best_encoder
+    pip_encoder = best_encoder if best_encoder == "h264_videotoolbox" else "libx264"
     encoder_args = get_encoder_args(pip_encoder, fps)
     command = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -541,50 +540,10 @@ def apply_pip_overlays(input_video, overlay_paths, overlay_positions,
         "bottom-right": (f"W-w-{margin}", f"H-h-{margin}"),
     }
 
-    if best_encoder == "h264_nvenc":
-        # ── NVIDIA CUDA path: decode → scale_cuda → overlay_cuda → nvenc ──
-        # Toàn bộ frame ở trên GPU, không xuống CPU → rất nhanh
-        input_args = [
-            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", input_video
-        ]
-        for opath in overlay_paths:
-            input_args += [
-                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                "-stream_loop", "-1", "-i", opath
-            ]
-
-        filter_parts = []
-        for i, ow in enumerate(overlay_size_pcts):
-            ow = max(2, int(ow) // 2 * 2)
-            filter_parts.append(f"[{i+1}:v]scale_cuda={ow}:-2[pip{i}]")
-
-        current = "0:v"
-        for i, pos in enumerate(overlay_positions):
-            x, y = pos_map.get(pos, (margin, margin))
-            out = "vfinal" if i == n - 1 else f"vtmp{i}"
-            filter_parts.append(f"[{current}][pip{i}]overlay_cuda={x}:{y}[{out}]")
-            current = out
-
-        command = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-progress", "pipe:1", "-stats_period", "1",
-            *input_args,
-            "-filter_complex", ";".join(filter_parts),
-            "-map", "[vfinal]",
-            "-map", "0:a:0",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", "5M", "-cq", "23",
-            "-r", str(fps),
-            "-c:a", "copy",
-            "-t", str(main_duration),
-            "-movflags", "+faststart",
-            output_video
-        ]
-
-    else:
-        # ── CPU overlay path (Mac videotoolbox, Intel QSV, AMD AMF, libx264) ──
-        # QSV/AMF trên Windows hay treo với filter_complex overlay → dùng libx264
-        pip_encoder = "libx264" if best_encoder in ("h264_qsv", "h264_amf") else best_encoder
-        encoder_args = get_encoder_args(pip_encoder, fps)
+    # ── CPU overlay path ──
+    # Chỉ Mac (h264_videotoolbox) giữ hardware encode; Windows (nvenc/qsv/amf) dùng libx264 tránh treo
+    pip_encoder = best_encoder if best_encoder == "h264_videotoolbox" else "libx264"
+    encoder_args = get_encoder_args(pip_encoder, fps)
 
         input_args = ["-i", input_video]
         for opath in overlay_paths:
