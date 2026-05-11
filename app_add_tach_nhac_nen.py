@@ -36,9 +36,16 @@ except ImportError:
 
 DEMUCS_AVAILABLE = False
 try:
-    import importlib.util
-    DEMUCS_AVAILABLE = importlib.util.find_spec("demucs") is not None
-except Exception:
+    import demucs
+    DEMUCS_AVAILABLE = True
+except ImportError:
+    pass
+
+YT_DLP_AVAILABLE = False
+try:
+    import yt_dlp
+    YT_DLP_AVAILABLE = True
+except ImportError:
     pass
 
 # =========================================================
@@ -2660,9 +2667,7 @@ class VideoTab(tk.Frame):
         threading.Thread(target=self._ytdl_download, daemon=True).start()
 
     def _ytdl_download(self):
-        try:
-            import yt_dlp
-        except ImportError:
+        if not YT_DLP_AVAILABLE:
             self.log("Thiếu thư viện: pip install yt-dlp", "error")
             return
 
